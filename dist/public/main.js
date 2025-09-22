@@ -6,16 +6,22 @@
             isSupported(entry) && h(ImgFallback, {
                 fallback: () => entry.getDefaultIcon(),
                 props: {
-                    src: entry.uri + '?get=thumb',
+                    // request thumbnail with default format and default pixel size
+                    src: entry.uri + '?get=thumb&s=' + encodeURIComponent(config.pixels) + '&format=' + encodeURIComponent(config.defaultFormat || 'avif'),
                     className: 'icon thumbnail',
-                    loading: config.lazyLoading ? 'lazy' : undefined, // eager is default
+                    loading: config.lazyLoading ? 'lazy' : undefined,
                     onMouseLeave() {
-                        document.getElementById('thumbnailsPreview').innerHTML = ''
+                        const p = document.getElementById('thumbnailsPreview')
+                        if (p) p.innerHTML = ''
                     },
                     onMouseEnter(ev) {
-                        if (!ev.target.closest('.dir')) return // only from within the file list, not (for example) when used as icon for the file-menu
-                        if (!HFS.state.tile_size)
-                            document.getElementById('thumbnailsPreview').innerHTML = "<img src='" + entry.uri + "?get=thumb'/>"
+                        if (!ev.target.closest('.dir')) return
+                        // only show preview when not in tiles mode
+                        if (!HFS.state.tile_size) {
+                            const previewSize = calcPreviewSize(config.pixels, config.stepMultiplier)
+                            const src = entry.uri + '?get=thumb&s=' + encodeURIComponent(previewSize) + '&format=' + encodeURIComponent(config.defaultFormat || 'avif')
+                            document.getElementById('thumbnailsPreview').innerHTML = "<img src='" + src + "'/>"
+                        }
                     },
                 }
             })
@@ -30,8 +36,11 @@
                         document.getElementById('thumbnailsPreview').innerHTML = ''
                     },
                     onMouseEnter() {
-                        if (!HFS.state.tile_size)
-                            document.getElementById('thumbnailsPreview').innerHTML = "<video src='" + entry.uri + "'/>"
+                        if (!HFS.state.tile_size) {
+                            const previewSize = calcPreviewSize(config.pixels, config.stepMultiplier)
+                            document.getElementById('thumbnailsPreview').innerHTML =
+                                "<video src='" + entry.uri + "?get=thumb&s=" + encodeURIComponent(previewSize) + "&format=" + encodeURIComponent(config.defaultFormat || 'avif') + "'/>"
+                        }
                     },
                 }
             })
@@ -64,5 +73,18 @@
         return entry._th // calculated server-side
             || ['jpg','jpeg','png','webp','tiff','tif','gif','avif','svg'].includes(entry.ext)
             || HFS.emit('thumbnails_supported', { entry }).some(Boolean)
+    }
+
+    function calcPreviewSize(base, step) {
+        // choose a reasonable preview size: one or two steps up but cap at 4096
+        const s = Number(base) || 256
+        const m = Number(step) || 2
+        // prefer two steps up if step is small, otherwise one step
+        let preview = Math.round(s * (m * (m <= 1.5 ? 1.5 : 1)))
+        // if that is not much bigger, try s*m*m
+        if (preview <= s * 1.25) preview = Math.round(s * m * m)
+        if (preview < s) preview = s * 2
+        if (preview > 4096) preview = 4096 //absolute limit upward for very large images
+        return preview
     }
 }
