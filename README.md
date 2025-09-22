@@ -1,3 +1,11 @@
+# Changes to the original plugin:
+
+- AVIF image support (default on, please **disable on low-power machines** by typing jpeg in the appropriate setting.)
+- Multiple resolutions on request, append &s=(desired-resolution) to get an image with at least that size.
+- The plugin won't actually generate an arbitrary size, but mipmap-style sizes based off the default resolution. (for example: default 256, step size: 2; this will make 64 128 256 512 .. (original image size))
+- these are all saved on disk in file descriptors, since EXIF doesnt really work, it is ignored and the EXIF feature removed. 
+- This will allow HFS to act like a pseudo-image-CDN and will give you the option to optimize image delivery as you please.
+
 # Thumbnails
 
 HFS plugin to show thumbnails for images in place of icons. Works best on "tiles mode" (enable it in frontend's options).
