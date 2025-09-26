@@ -1,4 +1,4 @@
-exports.version = 1.004
+exports.version = 1.005
 exports.description = "Show thumbnails for images in place of icons. Advanced pseudo-CDN features with mipmap support"
 exports.apiRequired = 8.65 // ctx.state.fileSource
 
@@ -87,6 +87,7 @@ exports.config = {
 }
 
 exports.changelog = [
+    { "version": 1.005, "message": "Fixed early returns and oriented to original working code" },
     { "version": 1.004, "message": "Fixed mipmap resolution selection and disk storage" },
     { "version": 1.003, "message": "Added mipmap support and disk-based caching" },
     { "version": 1, "message": "Complete overhaul of plugin. Please Uninstall and Reinstall" },
@@ -102,7 +103,7 @@ exports.init = async api => {
     const { createReadStream } = fs;
     const { loadFileAttr, storeFileAttr } = api.require('./misc');
 
-    const { utimes, access, mkdir, writeFile, unlink } = api.require('fs/promises');
+    const { utimes, access, mkdir, writeFile } = api.require('fs/promises');
     const { buffer } = api.require('node:stream/consumers');
 
     const crypto = api.require('crypto');
@@ -165,16 +166,10 @@ exports.init = async api => {
         return sizes;
     }
 
-    // Find the next larger size than requested, or return -1 if request exceeds original
-    function getNextLargestSize(requestedSize, originalLongSide, availableSizes) {
-        debugLog(`Finding next largest size for requested: ${requestedSize}, original: ${originalLongSide}, available: ${availableSizes}`);
+    // Find the next larger size than requested, but don't reject if too large
+    function getNextLargestSize(requestedSize, availableSizes) {
+        debugLog(`Finding next largest size for requested: ${requestedSize}, available: ${availableSizes}`);
         
-        // If we know the original size and request exceeds it, return sentinel
-        if (originalLongSide && requestedSize > originalLongSide) {
-            debugLog('Requested size exceeds original, returning -1');
-            return -1;
-        }
-
         // Find the next size that is >= requested
         for (const size of availableSizes) {
             if (size >= requestedSize) {
@@ -225,10 +220,10 @@ exports.init = async api => {
                 const { size, mtimeMs: ts } = ctx.state.fileStats;
                 debugLog(`File stats - size: ${size}, mtime: ${ts}`);
 
-                // Check if file is under threshold - serve original
+                // Check if file is under threshold - serve original (like original code)
                 if (size < api.getConfig('fullThreshold') * 1024) {
                     debugLog(`File size ${size} under threshold, serving original`);
-                    return;
+                    return; // Let original ctx.body be served
                 }
 
                 // Parse format request
@@ -263,7 +258,7 @@ exports.init = async api => {
                 const isFresh = cached?.ts === ts && (!regenerateBefore || (cached.thumbTs && new Date(cached.thumbTs) >= new Date(regenerateBefore)));
                 debugLog(`Cache freshness check - isFresh: ${isFresh}, cached.ts: ${cached.ts}, file.ts: ${ts}`);
 
-                // First pass: determine requested size without original dimensions
+                // Determine requested size
                 let requestedSize;
                 if (qS) {
                     requestedSize = qS;
@@ -274,11 +269,11 @@ exports.init = async api => {
                 } else {
                     requestedSize = getDefaultSize(availableSizes);
                 }
-                debugLog(`Requested size (first pass): ${requestedSize}`);
+                debugLog(`Requested size: ${requestedSize}`);
 
-                // Get selected size without original info first
-                let selectedSize = getNextLargestSize(requestedSize, undefined, availableSizes);
-                debugLog(`Selected size (first pass): ${selectedSize}`);
+                // Get selected size - always allow generation, never reject
+                let selectedSize = getNextLargestSize(requestedSize, availableSizes);
+                debugLog(`Selected size: ${selectedSize}`);
 
                 // Generate variant key
                 function variantKey(fmt, size, w, h) {
@@ -306,190 +301,109 @@ exports.init = async api => {
                     }
                 }
 
-                // Need to read original file for metadata and/or generation
-                debugLog('Loading original file buffer');
-                ctx.body.end = 1E9; // 1GB hard limit
+                // Need to generate - read original file
+                debugLog('Loading original file buffer for generation');
+                ctx.body.end = 1E8; // Like original code: 100MB hard limit
                 const content = await buffer(ctx.body);
                 debugLog(`Loaded ${content.length} bytes`);
 
-                // Get original dimensions
-                async function getOriginalDimensions(buf) {
-                    try {
-                        const sharpInst = api.customApiCall('sharp', buf)[0];
-                        if (!sharpInst || !sharpInst.metadata) return null;
-                        const meta = await sharpInst.metadata();
-                        if (!meta || !meta.width || !meta.height) return null;
-                        return { w: meta.width, h: meta.height, long: Math.max(meta.width, meta.height) };
-                    } catch (e) {
-                        debugLog('Metadata error:', e.message || e);
-                        return null;
-                    }
-                }
+                // Calculate resize dimensions (like original code)
+                const w = qW || selectedSize;
+                const h = qH || selectedSize;
+                debugLog(`Resize dimensions: ${w}x${h}`);
 
-                const orig = await getOriginalDimensions(content);
-                debugLog('Original dimensions:', orig);
+                const quality = api.getConfig('quality');
+                debugLog(`Quality: ${quality}`);
 
-                // Second pass: re-evaluate with original dimensions
-                selectedSize = getNextLargestSize(requestedSize, orig ? orig.long : undefined, availableSizes);
-                if (selectedSize === -1) {
-                    debugLog('Request exceeds original size, aborting');
-                    return false;
-                }
-                debugLog(`Selected size (final): ${selectedSize}`);
-
-                // Update variant key with final size
-                const finalVKey = variantKey(outFormat, selectedSize, qW, qH);
-                debugLog(`Final variant key: ${finalVKey}`);
-
-                // Try disk cache again with final key
-                if (isFresh && cached.variants && cached.variants[finalVKey]) {
-                    const cacheFilePath = getCacheFilename(fileSource, finalVKey);
-                    try {
-                        await access(cacheFilePath);
-                        debugLog('Serving from disk cache (final key)');
-                        ctx.set(header, 'cache (file)');
-                        if (cached.variants[finalVKey].type) {
-                            ctx.type = cached.variants[finalVKey].type;
-                        }
-                        return ctx.body = createReadStream(cacheFilePath);
-                    } catch (e) {
-                        debugLog(`Disk cache miss (final): ${e.message}`);
-                    }
-                }
-
-                // Generate thumbnail
-                debugLog('Generating new thumbnail');
                 ctx.set(header, 'generated');
 
-                // Calculate resize dimensions
-                let resizeW = undefined, resizeH = undefined;
-                if (qW || qH) {
-                    if (orig) {
-                        // Maintain aspect ratio based on orientation
-                        if (orig.w >= orig.h) {
-                            // Landscape or square - limit by width
-                            resizeW = selectedSize;
-                            if (qH) {
-                                // Calculate proportional height
-                                resizeH = Math.round((selectedSize / orig.w) * orig.h);
-                                if (resizeH > qH) resizeH = qH;
-                            }
+                // Generate thumbnail (similar to original code structure)
+                const sharpInstance = api.customApiCall('sharp', content)[0];
+                if (!sharpInstance) {
+                    debugLog('Missing sharp plugin');
+                    return error(500, 'missing "sharp" plugin');
+                }
+
+                let thumbnailBuffer;
+                let actualFormat = outFormat;
+                let mimeType;
+
+                try {
+                    let pipeline = sharpInstance.resize(w, h, { fit: 'inside' }).rotate();
+
+                    // Apply format
+                    if (outFormat === 'jpeg') {
+                        pipeline = pipeline.jpeg({ quality });
+                        mimeType = 'image/jpeg';
+                    } else if (outFormat === 'webp') {
+                        if (typeof pipeline.webp === 'function') {
+                            pipeline = pipeline.webp({ quality });
+                            mimeType = 'image/webp';
                         } else {
-                            // Portrait - limit by height
-                            resizeH = selectedSize;
-                            if (qW) {
-                                // Calculate proportional width
-                                resizeW = Math.round((selectedSize / orig.h) * orig.w);
-                                if (resizeW > qW) resizeW = qW;
-                            }
+                            debugLog('WebP not supported, falling back to JPEG');
+                            pipeline = pipeline.jpeg({ quality });
+                            actualFormat = 'jpeg';
+                            mimeType = 'image/jpeg';
+                        }
+                    } else if (outFormat === 'avif') {
+                        if (typeof pipeline.avif === 'function') {
+                            pipeline = pipeline.avif({ quality });
+                            mimeType = 'image/avif';
+                        } else {
+                            debugLog('AVIF not supported, falling back to JPEG');
+                            pipeline = pipeline.jpeg({ quality });
+                            actualFormat = 'jpeg';
+                            mimeType = 'image/jpeg';
                         }
                     } else {
-                        // No original info, use requested directly
-                        resizeW = qW || selectedSize;
-                        resizeH = qH;
+                        // Default fallback
+                        pipeline = pipeline.jpeg({ quality });
+                        actualFormat = 'jpeg';
+                        mimeType = 'image/jpeg';
                     }
-                } else {
-                    // No specific w/h requested, use selected size as max dimension
-                    resizeW = selectedSize;
-                    resizeH = selectedSize;
+
+                    thumbnailBuffer = Buffer.from(await pipeline.toBuffer());
+                    debugLog(`Generated ${thumbnailBuffer.length} bytes, format: ${actualFormat}`);
+
+                } catch (e) {
+                    debugLog('Generation error:', e.message || e);
+                    return error(501, e.message || String(e));
                 }
 
-                debugLog(`Resize dimensions: ${resizeW}x${resizeH}`);
+                // Set response
+                ctx.type = mimeType;
+                ctx.body = thumbnailBuffer;
 
-                async function generateThumbnail(fmt, sizeLong, optW, optH) {
-                    try {
-                        debugLog(`Generating: format=${fmt}, size=${sizeLong}, w=${optW}, h=${optH}`);
-                        
-                        const inst = api.customApiCall('sharp', content)[0];
-                        if (!inst) throw new Error('missing "sharp" plugin');
-
-                        // Prepare resize arguments
-                        const resizeOptions = { fit: 'inside' };
-                        let pipeline = inst.resize(optW || null, optH || null, resizeOptions).rotate();
-
-                        const quality = Number(api.getConfig('quality') || 80);
-                        let chosenFmt = fmt;
-
-                        // Apply format-specific processing
-                        if (fmt === 'jpeg') {
-                            pipeline = pipeline.jpeg({ quality });
-                        } else if (fmt === 'webp') {
-                            if (typeof pipeline.webp === 'function') {
-                                pipeline = pipeline.webp({ quality });
-                            } else {
-                                debugLog('WebP not supported, falling back to JPEG');
-                                pipeline = pipeline.jpeg({ quality });
-                                chosenFmt = 'jpeg';
-                            }
-                        } else if (fmt === 'avif') {
-                            if (typeof pipeline.avif === 'function') {
-                                pipeline = pipeline.avif({ quality });
-                            } else {
-                                debugLog('AVIF not supported, falling back to JPEG');
-                                pipeline = pipeline.jpeg({ quality });
-                                chosenFmt = 'jpeg';
-                            }
-                        } else {
-                            // Default fallback
-                            pipeline = pipeline.jpeg({ quality });
-                            chosenFmt = 'jpeg';
-                        }
-
-                        const outBuf = Buffer.from(await pipeline.toBuffer());
-                        debugLog(`Generated ${outBuf.length} bytes`);
-
-                        const mime = chosenFmt === 'jpeg' ? 'image/jpeg'
-                                : chosenFmt === 'webp' ? 'image/webp'
-                                : 'image/avif';
-
-                        // Store to disk (async, don't wait)
-                        const actualVKey = variantKey(chosenFmt, sizeLong, optW, optH);
-                        const cacheFilePath = getCacheFilename(fileSource, actualVKey);
-                        
-                        debugLog(`Saving to disk: ${cacheFilePath}`);
-                        writeFile(cacheFilePath, outBuf)
-                            .then(() => {
-                                debugLog(`Saved to disk successfully`);
-                                return utimes(cacheFilePath, new Date(ts), new Date(ts));
-                            })
-                            .then(() => debugLog(`Updated file timestamps`))
-                            .catch(e => debugLog(`Failed to save to disk: ${e.message || e}`));
-
-                        // Update metadata cache
-                        if (!cached.variants) cached.variants = {};
-                        cached.variants[actualVKey] = {
-                            type: mime,
-                            sizeLong,
-                            created: Date.now()
-                        };
-                        cached.ts = ts;
-                        cached.thumbTs = new Date();
-
-                        // Store metadata (async, don't wait)
-                        storeFileAttr(fileSource, K, cached)
-                            .then(() => debugLog(`Updated metadata cache`))
-                            .catch(failSilently);
-
-                        return { buf: outBuf, mime, vKey: actualVKey };
-                    } catch (e) {
-                        debugLog('Generation error:', e.message || e);
-                        return null;
-                    }
-                }
-
-                const result = await generateThumbnail(outFormat, selectedSize, resizeW, resizeH);
-                if (!result) {
-                    debugLog('Thumbnail generation failed');
-                    return error(501, 'thumbnail generation failed');
-                }
-
-                debugLog(`Generated thumbnail successfully: ${result.buf.length} bytes, mime: ${result.mime}`);
+                // Save to disk cache and update metadata (async, don't wait - like original code)
+                const finalVKey = variantKey(actualFormat, selectedSize, qW, qH);
+                const cacheFilePath = getCacheFilename(fileSource, finalVKey);
                 
-                ctx.type = result.mime;
-                ctx.body = result.buf;
+                debugLog(`Saving to disk: ${cacheFilePath}`);
+                
+                // Update cached metadata
+                if (!cached.variants) cached.variants = {};
+                cached.variants[finalVKey] = {
+                    type: mimeType,
+                    sizeLong: selectedSize,
+                    created: Date.now()
+                };
+                cached.ts = ts;
+                cached.thumbTs = new Date();
+
+                // Save to disk and update metadata (don't wait, like original)
+                storeFileAttr(fileSource, K, cached)
+                    .then(() => {
+                        debugLog('Updated metadata cache');
+                        return writeFile(cacheFilePath, thumbnailBuffer);
+                    })
+                    .then(() => {
+                        debugLog('Saved to disk successfully');
+                        return utimes(cacheFilePath, new Date(ts), new Date(ts));
+                    })
+                    .then(() => debugLog('Updated file timestamps'))
+                    .catch(failSilently);
                 
                 debugLog('=== THUMBNAIL REQUEST END ===');
-                return;
 
                 function error(code, body) {
                     debugLog(`Error response: ${code} - ${body}`);
