@@ -1,4 +1,4 @@
-exports.version = 1.002
+exports.version = 1.003
 exports.description = "Show thumbnails for images in place of icons. Advanced pseudo-CDN features"
 exports.apiRequired = 8.65 // ctx.state.fileSource
 
@@ -19,7 +19,7 @@ exports.config = {
         type: 'array',
         defaultValue: [250],
         width: {
-            sm: 600
+            sm: 1200
         },
         fields: { 
             entry: {
@@ -159,26 +159,25 @@ exports.init = async api => {
 
                 // compute sizes from config (hfs validates values)
                 const imageSizes = api.getConfig('pixels');
-                const sizes = (Array.isArray(imageSizes) ? imageSizes.map(Number).filter(n => Number.isFinite(n) && n > 0) : []).sort((a, b) => a - b);
-                const baseSize = sizes[Math.floor((sizes.length - 1) / 2)];
+                const parsedSizes = [];
 
-                function getNextLargest(inpLongPixelsRequested, inpOriginalLongPixels) {
-                    const current = Number(inpLongPixelsRequested);
-                    const original = Number(inpOriginalLongPixels);
-
-                    if (sizes.length === 0) return Number.isFinite(current) ? Math.max(1, Math.round(current)) : baseSize;
-
-                    if (Number.isNaN(current)) {
-                        return baseSize; //should not happen
+                if (Array.isArray(imageSizes)) {
+                    for (const v of imageSizes) {
+                        // Accept numbers, numeric strings, or objects with an 'entry' field (HFS-like)
+                        let n = undefined;
+                        if (typeof v === 'number') n = v;
+                        else if (typeof v === 'string' && v.trim() !== '') n = Number(v);
+                        else if (v && typeof v === 'object') {
+                            if ('entry' in v) n = Number(v.entry);
+                            else if ('value' in v) n = Number(v.value);
+                        }
+                        if (Number.isFinite(n) && n > 0) parsedSizes.push(Math.round(n));
                     }
-
-                    for (const s of sizes) {
-                        if (s >= current) return (Number.isFinite(original) && s > original) ? -1 : s;
-                    }
-
-                    const last = sizes[sizes.length - 1];
-                    return (Number.isFinite(original) && last > original) ? -1 : last;
                 }
+                
+                const sizes = parsedSizes.sort((a, b) => a - b);
+                const DEFAULT_BASE_SIZE = 250;
+                const baseSize = sizes.length ? sizes[Math.floor((sizes.length - 1) / 2)] : DEFAULT_BASE_SIZE;
 
                 // We can attempt to serve a fresh cached file without buffering the original:
                 // compute selectedLongSide without original info (orig undefined) to derive the requested mip.
