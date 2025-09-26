@@ -92,6 +92,9 @@ exports.init = async api => {
     
     const crypto = api.require('crypto');
 
+    const header = 'x-thumbnail'
+    const K = 'thumb_db'
+
     // Directory for generated files
     const cacheDir = api.storageDir;
     await mkdir(cacheDir, { recursive: true });
@@ -162,26 +165,25 @@ exports.init = async api => {
                 const orig = await getOriginalLongSide(content)
                 const imageSizes = api.getConfig('pixels');
 
+                const sizes = (Array.isArray(imageSizes) ? imageSizes.map(Number).filter(n => Number.isFinite(n) && n > 0) : []).sort((a,b) => a - b);
+                const baseSize = sizes[Math.floor((sizes.length - 1) / 2)];
+
                 function getNextLargest(inpLongPixelsRequested, inpOriginalLongPixels) {
                     const current = Number(inpLongPixelsRequested);
                     const original = Number(inpOriginalLongPixels);
 
-                    const sizes = (Array.isArray(imageSizes) ? imageSizes.slice() : [])
-                    .map(Number)
-                    .filter(n => Number.isFinite(n));
-
-                    sizes.sort((a, b) => b - a);
+                    if (sizes.length === 0) return Number.isFinite(current) ? Math.max(1, Math.round(current)) : baseSize;
 
                     if (Number.isNaN(current)) {
-                        const choice = sizes[0];
-                        return choice > original ? -1 : choice;
+                        return baseSize; //should not happen
                     }
 
                     for (const s of sizes) {
-                        if (s >= current) return s > original ? -1 : s;
+                        if (s >= current) return (Number.isFinite(original) && s > original) ? -1 : s;
                     }
 
-                    return sizes[0] > original ? -1 : sizes[0];
+                    const last = sizes[sizes.length - 1];
+                    return (Number.isFinite(original) && last > original) ? -1 : last;
                 }
 
                 let selectedLongSide
@@ -206,7 +208,7 @@ exports.init = async api => {
                         await access(cacheFilePath); // Check for existence
                         ctx.set(header, 'cache (file)');
                         ctx.type = outFormat; //TODO
-                        return ctx.body = createReadStream(cacheFilePath);
+                        return ctx.body = fileSystem(cacheFilePath);
                     } catch (e) {
                         // Not in file cache, will proceed.
                     }
@@ -305,7 +307,7 @@ exports.init = async api => {
                 ctx.body = body
             }
         }
-        
+
         function failSilently(e) {
             console.debug(`thumbnails: ${e && e.message || e}`)
         }
