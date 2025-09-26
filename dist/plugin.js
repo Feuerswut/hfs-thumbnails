@@ -1,4 +1,4 @@
-exports.version = 1.001
+exports.version = 1.002
 exports.description = "Show thumbnails for images in place of icons. Advanced pseudo-CDN features"
 exports.apiRequired = 8.65 // ctx.state.fileSource
 
@@ -21,10 +21,13 @@ exports.config = {
         width: {
             sm: 600
         },
-        items: { 
-            type: "number", 
-            minimum: 1, 
-            maximum: 100 
+        fields: { 
+            entry: {
+                type: 'number',
+                label: "Dimension (px)",
+                placeholder: 250,
+                defaultValue: 250
+            }
         },
         helperText: "Dimensions of longest side (default thumbnail size mips)",
         unit: 'pixels',
